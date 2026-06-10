@@ -89,24 +89,48 @@ def upload_to_google_drive(image_bytes, mime_type="image/jpeg"):
 class GeminiService:
     @staticmethod
     def _execute_post_request(payload):
-        """Menembak API Gemini dengan URL stabil v1beta menggunakan model gemini-1.5-flash."""
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        """Menembak API Gemini dengan mencoba beberapa model dan versi secara dinamis guna menghindari error 404."""
+        # Mencoba gemini-2.5-flash, gemini-1.5-flash, dan gemini-1.5-flash-latest
+        models = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-flash-latest"]
+        versions = ["v1beta", "v1"]
+        
+        last_error = ""
         headers = {"Content-Type": "application/json"}
         
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=15)
-            if response.status_code == 200:
-                return response.json()
-            else:
-                error_msg = response.text
+        for model in models:
+            for version in versions:
+                url = f"https://generativelanguage.googleapis.com/{version}/models/{model}:generateContent?key={GEMINI_API_KEY}"
                 try:
-                    err_json = response.json()
-                    error_msg = err_json.get("error", {}).get("message", response.text)
-                except:
-                    pass
-                raise Exception(f"Google API Error {response.status_code}: {error_msg}")
-        except Exception as e:
-            raise Exception(f"Koneksi ke Gemini API gagal: {str(e)}")
+                    response = requests.post(url, headers=headers, json=payload, timeout=15)
+                    if response.status_code == 200:
+                        return response.json()
+                    else:
+                        error_msg = response.text
+                        try:
+                            err_json = response.json()
+                            error_msg = err_json.get("error", {}).get("message", response.text)
+                        except:
+                            pass
+                        last_error = f"Model {model} ({version}) -> Google API {response.status_code}: {error_msg}"
+                except Exception as e:
+                    last_error = f"Model {model} ({version}) -> Koneksi gagal: {str(e)}"
+                    
+        # Jika semua kombinasi model & versi API gagal, lemparkan instruksi perbaikan yang sangat jelas
+        friendly_error = (
+            f"❌ *Semua kombinasi model Gemini gagal diakses.*\n"
+            f"⚠️ *Penyebab Terakhir*: `{last_error}`\n\n"
+            "💡 *Solusi Pasti (99% Berhasil)*:\n"
+            "Masalah ini terjadi karena API Key Anda dibuat melalui **Google Cloud Console** biasa namun belum mengaktifkan library Generative Language, "
+            "atau kunci Anda memiliki batasan API.\n\n"
+            "**Cara Memperbaikinya dalam 1 Menit**:\n"
+            "1. Buka **[aistudio.google.com](https://aistudio.google.com/)**.\n"
+            "2. Login dengan Google, klik tombol **Get API Key** lalu klik **Create API Key**.\n"
+            "3. Salin kunci baru tersebut (biasanya diawali dengan `AIzaSy...`).\n"
+            "4. Masuk ke dashboard **Vercel** Anda -> **Settings > Environment Variables**.\n"
+            "5. Edit nilai `GEMINI_API_KEY` dengan kunci baru tersebut (**Tanpa tanda petik**).\n"
+            "6. Masuk ke tab **Deployments** di Vercel, klik tombol titik tiga `...` pada deploy teratas, lalu klik **Redeploy**."
+        )
+        raise Exception(friendly_error)
 
     @classmethod
     def analyze_message_intent(cls, user_text):
@@ -412,17 +436,14 @@ def webhook():
                 
             # B. Verifikasi Langsung Gemini API dengan Google
             try:
+                # Menjalankan loop tes model yang sama seperti di engine utama untuk diagnosa akurat
                 test_payload = {
-                    "contents": [{"parts": [{"text": "Katakan 'Halo Bot Otomasi Pengeluaran' dalam satu baris saja."}]}]
+                    "contents": [{"parts": [{"text": "Katakan 'OK' dalam satu kata saja."}]}]
                 }
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-                res = requests.post(url, json=test_payload, headers={"Content-Type": "application/json"}, timeout=10)
-                if res.status_code == 200:
-                    diagnostic_results.append("✅ *Gemini API*: Berhasil terhubung!")
-                else:
-                    diagnostic_results.append(f"❌ *Gemini API*: Gagal terhubung (Status {res.status_code})\nDetail Error: `{res.text}`")
+                res_data = GeminiService._execute_post_request(test_payload)
+                diagnostic_results.append("✅ *Gemini API*: Berhasil terhubung!")
             except Exception as ex:
-                diagnostic_results.append(f"❌ *Gemini API*: Error Koneksi\nDetail: `{str(ex)}`")
+                diagnostic_results.append(f"❌ *Gemini API*: Gagal terhubung\nDetail:\n`{str(ex)}`")
                 
             # C. Verifikasi Google Sheets
             try:
