@@ -1,1 +1,0 @@
-https://api.telegram.org/bot8874211017:AAGfTg1SEyXUfk9vapYPlg1BKYMF-lrvZvI/setWebhook?url=https://automasi-pencatatan-pengeluaran.vercel.app/webhook
