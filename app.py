@@ -14,17 +14,18 @@ from googleapiclient.http import MediaIoBaseUpload
 
 app = Flask(__name__)
 
-# ==================== KONFIGURASI KREDENSIAL ====================
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GOOGLE_SHEET_KEY = os.environ.get("GOOGLE_SHEET_KEY") # ID unik Google Sheet Anda
-GOOGLE_SHEET_NAME = os.environ.get("GOOGLE_SHEET_NAME", "Sheet1") # Nama sheet
+# ==================== KONFIGURASI KREDENSIAL (DENGAN STRIP OTOMATIS) ====================
+# Membersihkan tanda kutip ganda/tunggal dan spasi yang tidak sengaja ter-paste di Vercel
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip("'\" ")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip("'\" ")
+GOOGLE_SHEET_KEY = os.environ.get("GOOGLE_SHEET_KEY", "").strip("'\" ")
+GOOGLE_SHEET_NAME = os.environ.get("GOOGLE_SHEET_NAME", "Sheet1").strip("'\" ")
 
 # ID Folder Google Drive tempat menyimpan struk
-GOOGLE_DRIVE_FOLDER_ID = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
+GOOGLE_DRIVE_FOLDER_ID = os.environ.get("GOOGLE_DRIVE_FOLDER_ID", "").strip("'\" ")
 
 # Mengambil kredensial Google Service Account
-GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
 
 def get_google_credentials():
     """Mengembalikan objek kredensial Google yang sah untuk Sheets dan Drive."""
@@ -86,12 +87,41 @@ def upload_to_google_drive(image_bytes, mime_type="image/jpeg"):
 
 # ==================== KELAS UTAMA GEMINI AI INTEGRATION ====================
 class GeminiService:
+    @staticmethod
+    def _execute_post_request(payload, is_multimodal=False):
+        """Helper untuk menembak API Gemini dengan URL stabil v1 dan fallback v1beta secara dinamis."""
+        endpoints = [
+            f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}",
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        ]
+        
+        last_error = ""
+        headers = {"Content-Type": "application/json"}
+        
+        for url in endpoints:
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=12)
+                if response.status_code == 200:
+                    return response.json()
+                elif response.status_code == 404:
+                    last_error = (
+                        "🔴 *Error 404 dari Google API*:\n"
+                        "Google tidak dapat menemukan model Gemini menggunakan API Key Anda.\n\n"
+                        "💡 *Solusi Penting*:\n"
+                        "1. Jika Anda membuat kunci dari *Google Cloud Console*, pastikan Anda sudah mengaktifkan library **'Generative Language API'** pada project Anda.\n"
+                        "2. Cara termudah: Buka **aistudio.google.com**, klik **Create API Key**, salin kuncinya, dan pasang di Vercel sebagai `GEMINI_API_KEY` (Kunci dari AI Studio langsung aktif tanpa konfigurasi)."
+                    )
+                else:
+                    last_error = f"HTTP {response.status_code}: {response.text}"
+            except Exception as e:
+                last_error = str(e)
+                
+        raise Exception(last_error)
+
     @classmethod
     def analyze_message_intent(cls, user_text):
-        """Menganalisis pesan pengguna untuk mengklasifikasi intensi (pencatatan vs permintaan rekap)."""
+        """Menganalisis pesan pengguna untuk mengklasifikasi intensi dengan penanganan error yang kuat."""
         today_str = datetime.now().strftime("%Y-%m-%d %A")
-        # Menggunakan model stabil gemini-1.5-flash
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
         
         system_prompt = (
             "Kamu adalah asisten keuangan pribadi cerdas yang bertugas mengklasifikasi intensi pesan pengguna.\n"
@@ -99,14 +129,12 @@ class GeminiService:
             "Klasifikasikan pesan ke salah satu dari 3 intensi berikut:\n"
             "1. 'ADD_EXPENSE': Jika pesan berupa keinginan mencatat pengeluaran baru. Ekstrak data pengeluarannya.\n"
             "2. 'RECAP_REQUEST': Jika pesan berupa permintaan laporan, ringkasan, atau rekapitulasi pengeluaran untuk jangka waktu tertentu.\n"
-            "   Tugas utamamu adalah menghitung tanggal mulai (start_date) dan tanggal akhir (end_date) dalam format YYYY-MM-DD secara presisi menggunakan kalender riil hari ini.\n"
-            "   Contoh kasus hari ini (Rabu, 10 Juni 2026):\n"
-            "   - 'rekap minggu ini': Senin, 8 Juni 2026 ('2026-06-08') s.d Minggu, 14 Juni 2026 ('2026-06-14')\n"
-            "   - 'laporan bulan ini': 1 Juni 2026 ('2026-06-01') s.d 30 Juni 2026 ('2026-06-30')\n"
-            "   - 'pengeluaran kemarin': 9 Juni 2026 ('2026-06-09') s.d 9 Juni 2026 ('2026-06-09')\n"
-            "   - 'rekap mei 2026': 1 Mei 2026 ('2026-05-01') s.d 31 Mei 2026 ('2026-05-31')\n"
+            "   Tugas utamamu adalah menghitung tanggal mulai (start_date) and tanggal akhir (end_date) dalam format YYYY-MM-DD secara presisi menggunakan kalender riil hari ini.\n"
+            "   Contoh kasus hari ini:\n"
+            "   - 'rekap minggu ini': Senin s.d Minggu minggu ini\n"
+            "   - 'laporan bulan ini': Tanggal 1 s.d akhir bulan ini\n"
             "3. 'GENERAL': Jika berupa sapaan, bantuan, perintah start, atau pembicaraan umum.\n\n"
-            "Kembalikan jawaban dalam bentuk JSON yang sesuai dengan skema yang didefinisikan."
+            "Kembalikan jawaban dalam bentuk JSON."
         )
         
         schema = {
@@ -114,25 +142,24 @@ class GeminiService:
             "properties": {
                 "intent": {
                     "type": "STRING",
-                    "enum": ["ADD_EXPENSE", "RECAP_REQUEST", "GENERAL"],
-                    "description": "Kategori intensi pesan pengguna."
+                    "enum": ["ADD_EXPENSE", "RECAP_REQUEST", "GENERAL"]
                 },
                 "expense_data": {
                     "type": "OBJECT",
                     "properties": {
-                        "biaya": {"type": "INTEGER", "description": "Nominal biaya dalam angka tanpa simbol."},
-                        "uraian": {"type": "STRING", "description": "Keterangan belanja singkat."},
-                        "tanggal": {"type": "STRING", "description": "Format YYYY-MM-DD. Gunakan tanggal hari ini jika tidak disebutkan."},
-                        "kategori": {"type": "STRING", "description": "Pilih dari: Makanan, Transportasi, Kebutuhan Rumah, Kesehatan, Hiburan, Listrik & Air, Gadget, Lainnya."}
+                        "biaya": {"type": "INTEGER"},
+                        "uraian": {"type": "STRING"},
+                        "tanggal": {"type": "STRING"},
+                        "kategori": {"type": "STRING"}
                     },
                     "required": ["biaya", "uraian", "tanggal", "kategori"]
                 },
                 "recap_params": {
                     "type": "OBJECT",
                     "properties": {
-                        "start_date": {"type": "STRING", "description": "Tanggal mulai periode laporan format YYYY-MM-DD"},
-                        "end_date": {"type": "STRING", "description": "Tanggal akhir periode laporan format YYYY-MM-DD"},
-                        "period_description": {"type": "STRING", "description": "Deskripsi periode yang ramah, contoh: 'Minggu Ini (8-14 Juni 2026)' atau 'Bulan Mei 2026'"}
+                        "start_date": {"type": "STRING"},
+                        "end_date": {"type": "STRING"},
+                        "period_description": {"type": "STRING"}
                     },
                     "required": ["start_date", "end_date", "period_description"]
                 }
@@ -140,31 +167,66 @@ class GeminiService:
             "required": ["intent"]
         }
         
-        payload = {
-            "contents": [{"parts": [{"text": f"Pesan pengguna: '{user_text}'"}]}],
-            "systemInstruction": {"parts": [{"text": system_prompt}]},
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "responseSchema": schema
+        # Skenario Utama: Menggunakan Structured JSON (Lebih Rapi)
+        try:
+            payload = {
+                "contents": [{"parts": [{"text": f"Pesan pengguna: '{user_text}'"}]}],
+                "systemInstruction": {"parts": [{"text": system_prompt}]},
+                "generationConfig": {
+                    "responseMimeType": "application/json",
+                    "responseSchema": schema
+                }
             }
+            result = cls._execute_post_request(payload)
+            text_response = result['candidates'][0]['content']['parts'][0]['text']
+            return json.loads(text_response)
+        except Exception as e:
+            if "🔴" in str(e): 
+                raise e
+            print(f"Percobaan utama dengan schema gagal, beralih ke fallback manual: {str(e)}")
+            
+        # Skenario Cadangan: Manual Prompting JSON (Tanpa memakai simbol triple backtick langsung di kode)
+        fallback_instruction = (
+            f"{system_prompt}\n\n"
+            "Wajib kembalikan data dalam format JSON valid dengan struktur persis seperti di bawah ini tanpa teks pengantar atau blok kode markdown JSON:\n"
+            "{\n"
+            "  \"intent\": \"ADD_EXPENSE\",\n"
+            "  \"expense_data\": {\n"
+            "    \"biaya\": 50000,\n"
+            "    \"uraian\": \"beli bensin\",\n"
+            "    \"tanggal\": \"2026-06-11\",\n"
+            "    \"kategori\": \"Transportasi\"\n"
+            "  },\n"
+            "  \"recap_params\": {\n"
+            "    \"start_date\": \"2026-06-11\",\n"
+            "    \"end_date\": \"2026-06-11\",\n"
+            "    \"period_description\": \"Deskripsi\"\n"
+            "  }\n"
+            "}"
+        )
+        
+        fallback_payload = {
+            "contents": [{"parts": [{"text": f"Pesan pengguna: '{user_text}'\n\n{fallback_instruction}"}]}]
         }
         
-        headers = {"Content-Type": "application/json"}
-        response = requests.post(url, headers=headers, json=payload)
+        result_fallback = cls._execute_post_request(fallback_payload)
+        raw_text = result_fallback['candidates'][0]['content']['parts'][0]['text']
         
-        if response.status_code == 200:
-            result = response.json()
-            return json.loads(result['candidates'][0]['content']['parts'][0]['text'])
-        else:
-            raise Exception(f"Gagal memproses intensi dengan Gemini API: {response.text}")
+        # Bersihkan pembungkus markdown secara dinamis tanpa melanggar parser file
+        clean_text = raw_text.strip()
+        backticks = "`" * 3
+        if clean_text.startswith(backticks):
+            clean_text = clean_text.split(backticks)[1]
+            if clean_text.startswith("json"):
+                clean_text = clean_text[4:]
+        clean_text = clean_text.strip("`").strip()
+        
+        return json.loads(clean_text)
 
     @classmethod
     def analyze_image(cls, image_bytes, mime_type="image/jpeg"):
-        """Menganalisis gambar struk menggunakan Gemini Vision (Multimodal API)."""
+        """Menganalisis gambar struk menggunakan Gemini Vision dengan mekanisme pertahanan kuat."""
         today_str = datetime.now().strftime("%Y-%m-%d %A")
-        # Menggunakan model stabil gemini-1.5-flash
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-        
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
         
         system_instruction = (
@@ -189,35 +251,64 @@ class GeminiService:
             "required": ["biaya", "uraian", "tanggal", "kategori"]
         }
         
-        payload = {
+        try:
+            payload = {
+                "contents": [{
+                    "parts": [
+                        {"inlineData": {"mimeType": mime_type, "data": base64_image}},
+                        {"text": "Tolong baca foto struk belanja ini, cari total pengeluaran, uraian barang, tanggal struk, dan kategorikan."}
+                    ]
+                }],
+                "systemInstruction": {"parts": [{"text": system_instruction}]},
+                "generationConfig": {
+                    "responseMimeType": "application/json",
+                    "responseSchema": schema
+                }
+            }
+            result = cls._execute_post_request(payload, is_multimodal=True)
+            text_response = result['candidates'][0]['content']['parts'][0]['text']
+            return json.loads(text_response)
+        except Exception as e:
+            if "🔴" in str(e):
+                raise e
+            print(f"Gagal melakukan OCR Terstruktur, beralih ke manual: {str(e)}")
+            
+        fallback_instruction = (
+            f"{system_instruction}\n\n"
+            "Kembalikan data dalam format JSON valid dengan struktur persis seperti di bawah ini tanpa teks pengantar atau blok kode markdown JSON:\n"
+            "{\n"
+            "  \"biaya\": 150000,\n"
+            "  \"uraian\": \"belanja bulanan\",\n"
+            "  \"tanggal\": \"2026-06-11\",\n"
+            "  \"kategori\": \"Kebutuhan Rumah\"\n"
+            "}"
+        )
+        
+        fallback_payload = {
             "contents": [{
                 "parts": [
                     {"inlineData": {"mimeType": mime_type, "data": base64_image}},
-                    {"text": "Tolong baca foto struk belanja ini, cari total pengeluaran, uraian barang, tanggal struk, dan kategorikan."}
+                    {"text": fallback_instruction}
                 ]
-            }],
-            "systemInstruction": {"parts": [{"text": system_instruction}]},
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "responseSchema": schema
-            }
+            }]
         }
         
-        headers = {"Content-Type": "application/json"}
-        response = requests.post(url, headers=headers, json=payload)
+        result_fallback = cls._execute_post_request(fallback_payload, is_multimodal=True)
+        raw_text = result_fallback['candidates'][0]['content']['parts'][0]['text']
         
-        if response.status_code == 200:
-            result = response.json()
-            return json.loads(result['candidates'][0]['content']['parts'][0]['text'])
-        else:
-            raise Exception(f"Gagal menganalisis struk dengan Gemini API: {response.text}")
+        clean_text = raw_text.strip()
+        backticks = "`" * 3
+        if clean_text.startswith(backticks):
+            clean_text = clean_text.split(backticks)[1]
+            if clean_text.startswith("json"):
+                clean_text = clean_text[4:]
+        clean_text = clean_text.strip("`").strip()
+        
+        return json.loads(clean_text)
 
     @classmethod
     def generate_recap_report(cls, expenses, period_desc):
         """Menggunakan AI untuk menghasilkan draf laporan keuangan yang menarik berdasarkan data filter."""
-        # Menggunakan model stabil gemini-1.5-flash
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-        
         expenses_json = json.dumps(expenses, indent=2)
         
         system_prompt = (
@@ -225,13 +316,13 @@ class GeminiService:
             "Tugasmu adalah mengubah data mentah pengeluaran pengguna menjadi laporan keuangan periodik yang sangat menarik, rapi, dan mudah dipahami.\n\n"
             "Gunakan format Markdown Telegram yang didukung:\n"
             "- Gunakan huruf tebal (*teks*) untuk penekanan angka, judul, atau kategori.\n"
-            "- Gunakan daftar berpoin dengan emoji menarik yang merepresentasikan tiap kategori.\n\n"
+            "- Gunakan daftar berpoin dengan emoji menarik yang representatif.\n\n"
             "Struktur laporan yang wajib kamu hasilkan:\n"
-            "1. 📊 *Judul Laporan & Periode Rekap* (dengan sentuhan emoji estetik).\n"
-            "2. 💵 *Ringkasan Total Pengeluaran* selama periode ini.\n"
-            "3. 🗂️ *Rincian Pengeluaran per Kategori* diurutkan dari yang terbesar, hitung juga persentase kontribusinya.\n"
-            "4. 💡 *Insight Penting* (Analisis pengeluaran terbesar, pola belanja, atau peringatan jika ada pemborosan).\n"
-            "5. 🌱 *Tips Finansial Pendek* yang edukatif, memotivasi, dan relevan dengan data pengeluaran mereka."
+            "1. 📊 *Judul Laporan & Periode Rekap*\n"
+            "2. 💵 *Ringkasan Total Pengeluaran*\n"
+            "3. 🗂️ *Rincian Pengeluaran per Kategori* diurutkan dari yang terbesar, hitung persentase kontribusinya.\n"
+            "4. 💡 *Insight Penting* (pola belanja)\n"
+            "5. 🌱 *Tips Finansial Pendek*"
         )
         
         payload = {
@@ -246,14 +337,8 @@ class GeminiService:
             "systemInstruction": {"parts": [{"text": system_prompt}]}
         }
         
-        headers = {"Content-Type": "application/json"}
-        response = requests.post(url, headers=headers, json=payload)
-        
-        if response.status_code == 200:
-            result = response.json()
-            return result['candidates'][0]['content']['parts'][0]['text']
-        else:
-            raise Exception(f"Gagal menyusun laporan rekap dengan Gemini: {response.text}")
+        result = cls._execute_post_request(payload)
+        return result['candidates'][0]['content']['parts'][0]['text']
 
 # ==================== HELPERS UNTUK TELEGRAM ====================
 def send_telegram_message(chat_id, text):
@@ -278,6 +363,19 @@ def download_telegram_file(file_id):
         if file_response.status_code == 200:
             return file_response.content
     return None
+
+def validate_environment_variables():
+    """Memeriksa apakah semua variabel lingkungan penting sudah diisi dan tidak kosong."""
+    missing = []
+    if not TELEGRAM_BOT_TOKEN:
+        missing.append("TELEGRAM_BOT_TOKEN")
+    if not GEMINI_API_KEY:
+        missing.append("GEMINI_API_KEY")
+    if not GOOGLE_SHEET_KEY:
+        missing.append("GOOGLE_SHEET_KEY")
+    if not GOOGLE_SERVICE_ACCOUNT_JSON and not os.path.exists("credentials.json"):
+        missing.append("GOOGLE_SERVICE_ACCOUNT_JSON (atau file credentials.json)")
+    return missing
 
 # ==================== GOOGLE SHEETS & FILTERING HANDLER ====================
 def save_to_google_sheet(data, file_url=None):
@@ -372,6 +470,22 @@ def webhook():
     message = update["message"]
     chat_id = message["chat"]["id"]
     
+    # LANGKAH DIAGNOSTIK UTAMA: Validasi Variabel Lingkungan di Vercel
+    missing_vars = validate_environment_variables()
+    if missing_vars:
+        error_msg = (
+            "⚠️ *Konfigurasi Vercel Tidak Lengkap!*\n\n"
+            "Aplikasi Flask mendeteksi bahwa variabel lingkungan penting berikut belum diisi atau kosong di dashboard Vercel Anda:\n"
+            f"{', '.join([f'`{v}`' for v in missing_vars])}\n\n"
+            "👉 *Cara Memperbaiki*:\n"
+            "1. Masuk ke **Vercel Dashboard**.\n"
+            "2. Buka menu **Settings > Environment Variables**.\n"
+            "3. Pastikan nama variabel di atas ditulis dengan benar dan diisi nilainya tanpa tanda kutip.\n"
+            "4. **PENTING**: Lakukan **Redeploy** (Deploy ulang) pada tab **Deployments** agar perubahan environment variable tersebut aktif!"
+        )
+        send_telegram_message(chat_id, error_msg)
+        return jsonify({"status": "missing_config"}), 200
+    
     # 1. Kasus Inputan Gambar (Photo/Struk)
     if "photo" in message:
         send_telegram_message(chat_id, "🔍 *Sedang memproses struk belanja Anda...*")
@@ -387,7 +501,7 @@ def webhook():
             send_telegram_message(chat_id, "📤 *Mengunggah foto struk ke Google Drive...*")
             filename_drive, file_url_drive = upload_to_google_drive(image_bytes, mime_type="image/jpeg")
             
-            # Ekstraksi dengan AI (Menggunakan gemini-1.5-flash)
+            # Ekstraksi dengan AI
             send_telegram_message(chat_id, "🧠 *AI sedang menganalisis isi struk belanja...*")
             extracted_data = GeminiService.analyze_image(image_bytes)
             
@@ -406,7 +520,7 @@ def webhook():
             send_telegram_message(chat_id, report)
             
         except Exception as e:
-            error_msg = f"❌ Terjadi kesalahan saat memproses gambar:\n`{str(e)}`"
+            error_msg = f"❌ Terjadi kesalahan saat memproses gambar:\n\n{str(e)}"
             send_telegram_message(chat_id, error_msg)
             
     # 2. Kasus Inputan Teks Bebas
@@ -425,7 +539,6 @@ def webhook():
             send_telegram_message(chat_id, welcome_text)
             return jsonify({"status": "welcome"}), 200
             
-        # Gunakan AI untuk menganalisis intensi pesan pengguna terlebih dahulu
         try:
             analysis = GeminiService.analyze_message_intent(user_text)
             intent = analysis.get("intent")
@@ -451,7 +564,7 @@ def webhook():
                     send_telegram_message(chat_id, f"⚠️ *Tidak ada pengeluaran yang tercatat* untuk periode *{period_desc}* ({start_date} s.d {end_date}).")
                     return jsonify({"status": "no_data_found"}), 200
                 
-                # Buat draf laporan atraktif menggunakan AI
+                # Buat draf laporan menggunakan AI
                 send_telegram_message(chat_id, "🧠 *AI sedang menyusun laporan analisis keuangan Anda...*")
                 report_markdown = GeminiService.generate_recap_report(matching_expenses, period_desc)
                 
@@ -479,7 +592,7 @@ def webhook():
                 send_telegram_message(chat_id, "👋 Maaf, saya tidak begitu memahami instruksi Anda. Silakan ketik perintah pencatatan pengeluaran atau permintaan rekapitulasi pengeluaran Anda.")
                 
         except Exception as e:
-            error_msg = f"❌ Terjadi kesalahan saat memproses permintaan:\n`{str(e)}`"
+            error_msg = f"❌ Terjadi kesalahan saat memproses permintaan:\n\n{str(e)}"
             send_telegram_message(chat_id, error_msg)
             
     return jsonify({"status": "success"}), 200
