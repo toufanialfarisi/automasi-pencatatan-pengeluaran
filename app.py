@@ -90,7 +90,8 @@ class GeminiService:
     def analyze_message_intent(cls, user_text):
         """Menganalisis pesan pengguna untuk mengklasifikasi intensi (pencatatan vs permintaan rekap)."""
         today_str = datetime.now().strftime("%Y-%m-%d %A")
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
+        # Menggunakan model stabil gemini-1.5-flash
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
         
         system_prompt = (
             "Kamu adalah asisten keuangan pribadi cerdas yang bertugas mengklasifikasi intensi pesan pengguna.\n"
@@ -161,7 +162,8 @@ class GeminiService:
     def analyze_image(cls, image_bytes, mime_type="image/jpeg"):
         """Menganalisis gambar struk menggunakan Gemini Vision (Multimodal API)."""
         today_str = datetime.now().strftime("%Y-%m-%d %A")
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
+        # Menggunakan model stabil gemini-1.5-flash
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
         
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
         
@@ -213,7 +215,8 @@ class GeminiService:
     @classmethod
     def generate_recap_report(cls, expenses, period_desc):
         """Menggunakan AI untuk menghasilkan draf laporan keuangan yang menarik berdasarkan data filter."""
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key={GEMINI_API_KEY}"
+        # Menggunakan model stabil gemini-1.5-flash
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
         
         expenses_json = json.dumps(expenses, indent=2)
         
@@ -384,7 +387,7 @@ def webhook():
             send_telegram_message(chat_id, "📤 *Mengunggah foto struk ke Google Drive...*")
             filename_drive, file_url_drive = upload_to_google_drive(image_bytes, mime_type="image/jpeg")
             
-            # Ekstraksi dengan AI
+            # Ekstraksi dengan AI (Menggunakan gemini-1.5-flash)
             send_telegram_message(chat_id, "🧠 *AI sedang menganalisis isi struk belanja...*")
             extracted_data = GeminiService.analyze_image(image_bytes)
             
